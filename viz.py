@@ -340,7 +340,7 @@ def show_kmeans_global():
 
         print(f"  {sym} CLUSTER #{cid}")
         print(f"     {bar} {size} utilisateurs ({pct:.1f}%)")
-        print(f"     {icon} Genre dominant : {genre.upper():<12}  ⭐ Note moy. : {avg_r:.2f}/5")
+        print(f"     {icon} Genre dominant : {genre.upper():<12}   Note moy. : {avg_r:.2f}/5")
 
         # Répartition des genres secondaires
         breakdown = genre_breakdown.get(cid, {})

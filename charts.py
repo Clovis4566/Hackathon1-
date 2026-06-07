@@ -155,60 +155,89 @@ def plot_user_ratings_timeline(user_id: str, user_name: str) -> str:
     """
     02 — Évolution des notes dans le temps pour l'utilisateur.
          Points annotés avec le titre du film.
+         Si toutes les notes tombent le même jour (données ETL), l'axe X
+         bascule en mode séquentiel (ordre de notation, n°1, n°2 …).
     """
-    data = database.get_ratings_over_time(user_id)
-    if len(data) < 2:
-        print(f"  ⚠  Pas assez de données timeline pour {user_name}.")
-        return ""
-
-    # Détails film par film (pas agrégés par jour)
     conn = database.get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT r.movie, r.rating, r.timestamp
         FROM ratings r
         WHERE r.user_id = ? AND r.timestamp IS NOT NULL
-        ORDER BY r.timestamp ASC;
+        ORDER BY r.timestamp ASC, r.rowid ASC;
     """, (user_id,))
     detail_rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
 
     if len(detail_rows) < 2:
-        print(f"  ⚠  Pas assez d'entrées détaillées pour {user_name}.")
+        print(f"  ⚠  Pas assez de données timeline pour {user_name}.")
         return ""
 
-    dates   = [datetime.strptime(r["timestamp"][:10], "%Y-%m-%d") for r in detail_rows]
     ratings = [r["rating"] for r in detail_rows]
-    titles  = [r["movie"] for r in detail_rows]
+    titles  = [r["movie"]  for r in detail_rows]
+
+    # Détection : toutes les dates sont-elles identiques ?
+    raw_dates = [r["timestamp"][:10] for r in detail_rows]
+    all_same_date = len(set(raw_dates)) == 1
 
     fig, ax = plt.subplots(figsize=(13, 5))
-    ax.plot(dates, ratings, color="#1D3557", linewidth=2,
-            marker="o", markersize=8,
-            markerfacecolor="#E63946", markeredgecolor="white", markeredgewidth=1.5,
-            zorder=3)
-    ax.fill_between(dates, ratings, alpha=0.10, color="#1D3557")
 
-    for date, rating, title in zip(dates, ratings, titles):
-        short = (title[:15] + "…") if len(title) > 15 else title
-        ax.annotate(short, (date, rating),
-                    textcoords="offset points", xytext=(0, 12),
-                    ha="center", fontsize=7, rotation=30, color="#333")
+    if all_same_date:
+        # ── Mode séquentiel (index) ───────────────────────────────────────────
+        x_vals  = list(range(1, len(ratings) + 1))
+        x_label = f"Ordre de notation  (toutes les notes le {raw_dates[0]})"
 
-    # Ligne de tendance linéaire
-    x_num = np.array([(d - dates[0]).days for d in dates], dtype=float)
-    if len(x_num) >= 2:
-        slope, intercept, r_val, *_ = _linregress(x_num, ratings)
+        ax.plot(x_vals, ratings, color="#1D3557", linewidth=2,
+                marker="o", markersize=8,
+                markerfacecolor="#E63946", markeredgecolor="white", markeredgewidth=1.5,
+                zorder=3)
+        ax.fill_between(x_vals, ratings, alpha=0.10, color="#1D3557")
+
+        for xi, (rating, title) in enumerate(zip(ratings, titles), 1):
+            short = (title[:14] + "…") if len(title) > 14 else title
+            ax.annotate(short, (xi, rating),
+                        textcoords="offset points", xytext=(0, 12),
+                        ha="center", fontsize=7, rotation=30, color="#333")
+
+        x_num = np.array(x_vals, dtype=float)
+        slope, intercept, r_val = _linregress(x_num, ratings)
+        y_trend = slope * x_num + intercept
+        ax.plot(x_vals, y_trend, linestyle="--", color="#F4A261",
+                linewidth=1.5, label=f"Tendance (r={r_val:.2f})")
+        ax.set_xticks(x_vals)
+        ax.set_xticklabels([f"#{i}" for i in x_vals], fontsize=8)
+
+    else:
+        # ── Mode date réelle ─────────────────────────────────────────────────
+        dates  = [datetime.strptime(d, "%Y-%m-%d") for d in raw_dates]
+        x_vals = dates
+        x_label = "Date"
+
+        ax.plot(dates, ratings, color="#1D3557", linewidth=2,
+                marker="o", markersize=8,
+                markerfacecolor="#E63946", markeredgecolor="white", markeredgewidth=1.5,
+                zorder=3)
+        ax.fill_between(dates, ratings, alpha=0.10, color="#1D3557")
+
+        for date, rating, title in zip(dates, ratings, titles):
+            short = (title[:14] + "…") if len(title) > 14 else title
+            ax.annotate(short, (date, rating),
+                        textcoords="offset points", xytext=(0, 12),
+                        ha="center", fontsize=7, rotation=30, color="#333")
+
+        x_num = np.array([(d - dates[0]).days for d in dates], dtype=float)
+        slope, intercept, r_val = _linregress(x_num, ratings)
         y_trend = slope * x_num + intercept
         ax.plot(dates, y_trend, linestyle="--", color="#F4A261",
                 linewidth=1.5, label=f"Tendance (r={r_val:.2f})")
-        ax.legend(fontsize=9)
+        fig.autofmt_xdate()
 
+    ax.axhline(np.mean(ratings), linestyle=":", color="#2A9D8F",
+               linewidth=1.2, label=f"Moyenne : {np.mean(ratings):.2f}/5")
     ax.set_ylim(0.5, 5.8)
     ax.set_yticks([1, 2, 3, 4, 5])
-    ax.axhline(np.mean(ratings), linestyle=":", color="#2A9D8F",
-               linewidth=1.2, label=f"Moy. {np.mean(ratings):.2f}")
-    _style(ax, f"Évolution des notes — {user_name.upper()}", "Date", "Note /5")
-    fig.autofmt_xdate()
+    ax.legend(fontsize=9)
+    _style(ax, f"Évolution des notes — {user_name.upper()}", x_label, "Note /5")
     fig.tight_layout()
     return _save(fig, f"02_user_{user_name.lower()}_timeline.png")
 
@@ -485,7 +514,7 @@ def plot_kmeans_global(rows: list) -> str:
     ax.set_xticklabels([f"Cluster {k}" for k in cluster_ids], fontsize=10)
     ax.set_ylabel("Nombre d'utilisateurs", fontsize=10)
     _style(ax, f"Répartition des {total_users} utilisateurs par cluster\n"
-               "(⭐ = note moy. | genre dominant)",
+               "( = note moy. | genre dominant)",
            "Cluster", "Utilisateurs")
 
     # ── Stacked bar composition genres ───────────────────────────────────────
@@ -586,3 +615,78 @@ if __name__ == "__main__":
                 print(f"\n  ⚠  Clé de session inconnue : {session_code}")
 
     run_all_charts(user_id=user_id, user_name=user_name)
+
+def show_charts_menu(user_id: str, user_name: str):
+    """
+    Menu des graphiques PNG.
+    """
+
+    rows = _load_all_rows()
+
+    while True:
+
+        print("\n" + "═"*70)
+        print(" 📊 TABLEAU DE BORD — ANALYSE DE VOS DONNÉES")
+        print("═"*70)
+
+        print(" ── Vos statistiques personnelles ─────────────────────")
+        print(" [1] Distribution de vos genres regardés")
+        print(" [2] Évolution de vos notes")
+        print(" [3] Pearson — mes voisins")
+        print(" [4] K-Means — ma position")
+
+        print(" ── Vue globale ───────────────────────────────────────")
+        print(" [5] Pearson — matrice inter-genres")
+        print(" [6] K-Means — répartition globale")
+
+        print(" ─────────────────────────────────────────────────────")
+        print(" [7] Générer tous les graphiques")
+        print(" [Q] Retour")
+        print("═"*70)
+
+        choice = input("Votre choix : ").strip().upper()
+
+        if choice == "1":
+            path = plot_user_genre_pie(user_id, user_name)
+
+        elif choice == "2":
+            path = plot_user_ratings_timeline(user_id, user_name)
+
+        elif choice == "3":
+            path = plot_pearson_user_neighbors(user_id, user_name)
+
+        elif choice == "4":
+            path = plot_kmeans_scatter(
+                rows,
+                highlight_user_id=user_id,
+                highlight_name=user_name
+            )
+
+        elif choice == "5":
+            path = plot_pearson_genre_matrix(rows)
+
+        elif choice == "6":
+            path = plot_kmeans_global(rows)
+
+        elif choice == "7":
+            generated = run_all_charts(user_id, user_name)
+
+            print("\n✅ Graphiques générés :")
+            for p in generated:
+                print(f"   • {p}")
+
+            input("\nAppuyez sur ENTRÉE...")
+            continue
+
+        elif choice == "Q":
+            break
+
+        else:
+            print("❌ Option invalide.")
+            continue
+
+        if path:
+            print("\n✅ Graphique généré :")
+            print(path)
+
+        input("\nAppuyez sur ENTRÉE pour continuer...")

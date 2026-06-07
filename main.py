@@ -12,7 +12,7 @@ Interface utilisateur principale (IHM Console).
 import sys
 import database
 import onboarding
-import viz
+import charts
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,7 +255,10 @@ def run_main_application_loop(user):
             user = handle_edit_profile(user)
 
         elif choice == "4":
-            viz.show_viz_menu(user['user_id'])
+            charts.show_charts_menu(
+                user['user_id'],
+                user['name']
+            )
 
         elif choice == "5":
             print(f"\n👋 Déconnexion réussie. À bientôt {user['name']} !")

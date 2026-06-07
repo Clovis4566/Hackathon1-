@@ -89,24 +89,114 @@ def generate_large_dirty_csv_files():
     df_users["name"]    = df_users["name_base"] + "_" + df_users.index.astype(str)
     df_users.to_csv(os.path.join(DATA_DIR, "raw_users.csv"), index=False)
 
-    # ── Ratings ───────────────────────────────────────────────────────────────
-    user_repeats = 4
-    total_rows   = 500 * user_repeats
-    user_ids     = [f"U{(1 + (i // user_repeats)):03d}" for i in range(total_rows)]
-    movie_pool   = [
-        "Inception Original", "Gladiator Legacy", "Avatar Part I", "The Matrix Reloaded",
-        "The Hangover Original", "Toy Story Evolution", "Seven Reborn", "La La Land Saga"
-    ]
-    movie_titles = [movie_pool[i % len(movie_pool)] for i in range(total_rows)]
+    # ── Ratings réalistes selon le profil utilisateur ────────────────────────
+    #
+    # Logique : chaque utilisateur note des films cohérents avec son profil.
+    #   - Films du genre favori    → notes hautes  (3.5 – 5.0)
+    #   - Films de genres neutres  → notes moyennes (2.5 – 3.9)
+    #   - Films de genres opposés  → notes basses   (1.0 – 2.9)
+    #
+    # Chaque user reçoit entre 3 et 7 notes sur des films différents,
+    # répartis sur plusieurs dates pour donner une vraie timeline.
 
-    df_ratings = pd.DataFrame({
-        "user_id":     user_ids,
-        "movie_title": movie_titles,
-        "rating":      "4.1",
-        "timestamp":   "2026-06-01 14:22:00"
-    })
-    df_ratings.loc[df_ratings.index % 7 == 0, "rating"]    = "15.0"
-    df_ratings.loc[df_ratings.index % 9 == 0, "timestamp"] = None
+    import random as _rnd
+
+    # Genre opposé par profil (ex: fan d'action → romance est l'opposé)
+    OPPOSITES = {
+        "action":    ["romance", "animation"],
+        "comedy":    ["horror",  "thriller"],
+        "sci-fi":    ["romance", "comedy"],
+        "horror":    ["romance", "comedy"],
+        "thriller":  ["comedy",  "animation"],
+        "romance":   ["horror",  "action"],
+        "animation": ["horror",  "thriller"],
+        "drama":     ["horror",  "sci-fi"],
+        "mixed":     [],
+    }
+
+    # Pool de films par genre (titres présents dans raw_movies)
+    GENRE_POOLS = {
+        "sci-fi":    ["Inception Original", "Interstellar Original", "Blade Runner 2049 Original",
+                      "The Matrix Original"],
+        "action":    ["The Dark Knight Original", "Gladiator Original", "Avatar Original",
+                      "The Matrix Original"],
+        "thriller":  ["Seven Original", "Avatar Original", "Parasite Original"],
+        "drama":     ["Gladiator Original", "Pulp Fiction Original", "Parasite Original",
+                      "Titanic Original"],
+        "comedy":    ["The Hangover Original", "Superbad Original"],
+        "horror":    ["The Conjuring Original", "Get Out Original"],
+        "romance":   ["La La Land Original", "Titanic Original"],
+        "animation": ["Toy Story Original", "Spirited Away Original"],
+    }
+    # Fallback générique si un titre manque dans la base nettoyée
+    ALL_MOVIE_POOL = [
+        "Inception Original", "Gladiator Legacy", "Avatar Part I", "The Matrix Reloaded",
+        "The Hangover Original", "Toy Story Evolution", "Seven Reborn", "La La Land Saga",
+        "Interstellar Original", "The Dark Knight Original", "Pulp Fiction Original",
+        "Titanic Original", "The Conjuring Original", "Parasite Original",
+        "Get Out Original", "Spirited Away Original", "Blade Runner 2049 Original",
+        "Superbad Original"
+    ]
+
+    rating_rows = []
+    dates = [
+        "2026-01-15 10:00:00", "2026-02-03 18:30:00", "2026-02-20 21:00:00",
+        "2026-03-08 14:15:00", "2026-03-25 20:00:00", "2026-04-10 16:45:00",
+        "2026-05-01 19:30:00", "2026-05-18 22:00:00", "2026-06-01 14:22:00",
+    ]
+
+    df_u_ref = pd.read_csv(os.path.join(DATA_DIR, "raw_users.csv")) if os.path.exists(
+        os.path.join(DATA_DIR, "raw_users.csv")) else pd.DataFrame({"user_id": [f"U{i:03d}" for i in range(1,551)], "profile_type": ["mixed"]*550})
+
+    profile_map = dict(zip(df_u_ref["user_id"], df_u_ref["profile_type"].fillna("mixed")))
+
+    for uid, profile in profile_map.items():
+        profile = str(profile).lower().strip()
+        if profile not in OPPOSITES:
+            profile = "mixed"
+
+        opposites = OPPOSITES.get(profile, [])
+        n_ratings = _rnd.randint(3, 7)
+        used_movies = set()
+
+        # 60% films du genre favori, 25% neutres, 15% opposés
+        for k in range(n_ratings):
+            roll = _rnd.random()
+            if roll < 0.60 and profile != "mixed":
+                pool = GENRE_POOLS.get(profile, ALL_MOVIE_POOL)
+                rating = round(_rnd.uniform(3.5, 5.0), 1)
+            elif roll < 0.85 or profile == "mixed":
+                pool = ALL_MOVIE_POOL
+                rating = round(_rnd.uniform(2.5, 3.9), 1)
+            else:
+                opp = _rnd.choice(opposites) if opposites else None
+                pool = GENRE_POOLS.get(opp, ALL_MOVIE_POOL) if opp else ALL_MOVIE_POOL
+                rating = round(_rnd.uniform(1.0, 2.9), 1)
+
+            # Choisir un film non déjà noté par cet user
+            candidates = [m for m in pool if m not in used_movies]
+            if not candidates:
+                candidates = [m for m in ALL_MOVIE_POOL if m not in used_movies]
+            if not candidates:
+                break
+
+            movie = _rnd.choice(candidates)
+            used_movies.add(movie)
+            date = dates[k % len(dates)]
+            rating_rows.append({
+                "user_id":     uid,
+                "movie_title": movie,
+                "rating":      str(rating),
+                "timestamp":   date,
+            })
+
+    df_ratings = pd.DataFrame(rating_rows)
+    # Injection des erreurs volontaires pour démontrer le nettoyage ETL
+    n = len(df_ratings)
+    err_idx = df_ratings.sample(frac=0.05, random_state=42).index
+    df_ratings.loc[err_idx, "rating"] = "15.0"
+    null_idx = df_ratings.sample(frac=0.04, random_state=7).index
+    df_ratings.loc[null_idx, "timestamp"] = None
     df_ratings.to_csv(os.path.join(DATA_DIR, "raw_ratings.csv"), index=False)
 
 
