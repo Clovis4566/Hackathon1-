@@ -11,6 +11,12 @@ Stratégie évolutive :
              → Contenu (genre, réalisateur, pace) + Corrélation de Pearson
              + Clustering K-Means (héritage des voisins)
              + Exclusion âge automatique
+
+Corrections v2 :
+  • save_user_feedback : bloque la double notation d'un même film dans la même source
+  • _recommend_expert  : diversification forcée — max 2 films par réalisateur
+  • _recommend_ia      : diversification multi-genres via tags pondérés en fallback
+  • get_genre_distribution / get_ratings_over_time : données pour les visualisations
 """
 import sqlite3
 import os
@@ -20,9 +26,8 @@ from collections import defaultdict
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recommender.db")
 
-# ── Seuil de bascule Système Expert → IA ──────────────────────────────────────
-MATURITY_THRESHOLD = 5   # Abaissé à 5 pour la démo (50 en production)
-CLUSTER_COUNT      = 4   # Nombre de clusters K-Means
+MATURITY_THRESHOLD = 5
+CLUSTER_COUNT      = 4
 
 SECRET_QUESTIONS = [
     "Comment s'appelait ton tout premier animal de compagnie ?",
@@ -47,7 +52,6 @@ def create_tables():
     cursor = conn.cursor()
     cursor.execute("PRAGMA foreign_keys = ON;")
 
-    # ── Tables existantes ─────────────────────────────────────────────────────
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS movies (
         movie_id    TEXT PRIMARY KEY,
@@ -92,9 +96,6 @@ def create_tables():
         date_proposed TEXT
     );""")
 
-    # ── Nouvelles tables ───────────────────────────────────────────────────────
-
-    # Tags multi-genres déclarés à l'onboarding (remplace profile_type unique)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_tags (
         user_id TEXT NOT NULL,
@@ -103,7 +104,6 @@ def create_tables():
         FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
     );""")
 
-    # Résultat du clustering K-Means (recalculé périodiquement)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_clusters (
         user_id    TEXT PRIMARY KEY,
@@ -112,7 +112,6 @@ def create_tables():
         FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
     );""")
 
-    # Historique d'exploration (phase Cold Start) pour la diversification
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS exploration_log (
         user_id    TEXT NOT NULL,
@@ -126,7 +125,7 @@ def create_tables():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FONCTIONS UTILITAIRES DE BASE (inchangées)
+# FONCTIONS UTILITAIRES DE BASE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_all_unique_genres():
@@ -154,30 +153,14 @@ def get_user_viewing_history(user_id):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT movie, rating, timestamp, source
+        SELECT movie, rating, timestamp
         FROM ratings
         WHERE user_id = ?
-        AND source IN ('system_expert_feedback', 'discovery_quiz')
         ORDER BY timestamp DESC LIMIT 10;
     """, (user_id,))
     history = cursor.fetchall()
     conn.close()
     return history
-
-def save_user_tags(user_id, tags: list):
-    """Enregistre les tags déclarés à l'onboarding. tag[0] a un poids de 2.0 (primaire)."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM user_tags WHERE user_id = ?;", (user_id,))
-    for i, tag in enumerate(tags):
-        weight = 2.0 if i == 0 else 1.0
-        cursor.execute(
-            "INSERT INTO user_tags (user_id, tag, weight) VALUES (?, ?, ?);",
-            (user_id, tag.lower(), weight)
-        )
-    conn.commit()
-    conn.close()
-
 
 
 def save_recommendation(user_id, title):
@@ -207,34 +190,44 @@ def register_new_user(user_id, name, age, profile_type, session_code, question, 
         conn.close()
 
 
-def has_already_rated(user_id, movie_title) -> bool:
-    """Vérifie si l'utilisateur a déjà noté ce film."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT 1 FROM ratings WHERE user_id = ? AND movie = ? LIMIT 1;",
-        (user_id, movie_title)
-    )
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
-
-
 def save_user_feedback(user_id, movie_title, rating_value):
+    """
+    Enregistre le vote d'un utilisateur sur un film recommandé.
+
+    CORRECTION v2 : vérifie qu'il n'existe pas déjà une note
+    'system_expert_feedback' pour ce film ET cet utilisateur.
+    Si elle existe, met à jour la note au lieu d'insérer une nouvelle ligne.
+    Cela empêche la barre de progression de gonfler artificiellement.
+    """
     import datetime
-    # Anti-doublon : on refuse si le film a déjà été noté
-    if has_already_rated(user_id, movie_title):
-        return "already_rated"
     conn = get_connection()
     cursor = conn.cursor()
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
+        # Vérifie si une note feedback existe déjà pour ce film
         cursor.execute("""
-            INSERT INTO ratings (user_id, movie, rating, timestamp, source, reason)
-            VALUES (?, ?, ?, ?, 'system_expert_feedback', 'Évaluation de satisfaction post-recommandation');
-        """, (user_id, movie_title, float(rating_value), now_str))
-        conn.commit()
-        return True
+            SELECT rating_id FROM ratings
+            WHERE user_id = ? AND movie = ? AND source = 'system_expert_feedback'
+            LIMIT 1;
+        """, (user_id, movie_title))
+        existing = cursor.fetchone()
+
+        if existing:
+            # Mise à jour de la note existante (ne compte pas dans la progression)
+            cursor.execute("""
+                UPDATE ratings SET rating = ?, timestamp = ?
+                WHERE rating_id = ?;
+            """, (float(rating_value), now_str, existing["rating_id"]))
+            conn.commit()
+            return "updated"   # Signal distinct pour main.py
+        else:
+            # Nouvelle note
+            cursor.execute("""
+                INSERT INTO ratings (user_id, movie, rating, timestamp, source, reason)
+                VALUES (?, ?, ?, ?, 'system_expert_feedback', 'Évaluation de satisfaction post-recommandation');
+            """, (user_id, movie_title, float(rating_value), now_str))
+            conn.commit()
+            return "inserted"
     except sqlite3.Error:
         return False
     finally:
@@ -242,32 +235,21 @@ def save_user_feedback(user_id, movie_title, rating_value):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GESTION DES TAGS (multi-genres onboarding)
+# GESTION DES TAGS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def save_discovery_rating(user_id: str, movie_title: str, rating_value: float):
-    """
-    Enregistre une note issue du quiz de découverte (onboarding).
-    source = 'discovery_quiz' — comptabilisée dans la maturité.
-    """
-    import datetime
-    if has_already_rated(user_id, movie_title):
-        return  # Pas de doublon
+def save_user_tags(user_id, tags: list):
     conn = get_connection()
     cursor = conn.cursor()
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        cursor.execute("""
-            INSERT INTO ratings (user_id, movie, rating, timestamp, source, reason)
-            VALUES (?, ?, ?, ?, 'discovery_quiz', 'Note enregistrée lors du quiz de découverte');
-        """, (user_id, movie_title, float(rating_value), now_str))
-        conn.commit()
-    except sqlite3.Error:
-        pass
-    finally:
-        conn.close()
-
-
+    cursor.execute("DELETE FROM user_tags WHERE user_id = ?;", (user_id,))
+    for i, tag in enumerate(tags):
+        weight = 2.0 if i == 0 else 1.0
+        cursor.execute(
+            "INSERT INTO user_tags (user_id, tag, weight) VALUES (?, ?, ?);",
+            (user_id, tag.lower(), weight)
+        )
+    conn.commit()
+    conn.close()
 
 
 def get_user_tags(user_id) -> list:
@@ -287,20 +269,14 @@ def get_user_tags(user_id) -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_user_maturity(user_id) -> dict:
-    """
-    Retourne un dictionnaire :
-      - rating_count  : nombre de films notés
-      - mode          : 'discovery' | 'expert' | 'ia'
-      - is_ai_ready   : bool
-    """
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        """SELECT COUNT(DISTINCT movie) as cnt FROM ratings
-           WHERE user_id = ?
-           AND source IN ('system_expert_feedback', 'discovery_quiz');""",
-        (user_id,)
-    )
+    # Compte les films DISTINCTS notés (pas les doublons de notation)
+    cursor.execute("""
+        SELECT COUNT(DISTINCT movie) as cnt
+        FROM ratings
+        WHERE user_id = ? AND source = 'system_expert_feedback';
+    """, (user_id,))
     cnt = cursor.fetchone()["cnt"]
     conn.close()
 
@@ -319,15 +295,280 @@ def get_user_maturity(user_id) -> dict:
         "progress_pct": min(100, int(cnt / MATURITY_THRESHOLD * 100))
     }
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DONNÉES POUR VISUALISATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_genre_distribution(user_id) -> dict:
+    """
+    Retourne {genre: nombre_de_films_notés} pour l'utilisateur.
+    Utilisé pour le graphique camembert/barres de distribution des genres.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT m.genre, COUNT(*) as cnt
+        FROM ratings r
+        JOIN movies m ON r.movie = m.title
+        WHERE r.user_id = ?
+        GROUP BY m.genre
+        ORDER BY cnt DESC;
+    """, (user_id,))
+    result = {row["genre"]: row["cnt"] for row in cursor.fetchall()}
+    conn.close()
+    return result
+
+
+def get_ratings_over_time(user_id) -> list:
+    """
+    Retourne une liste de (date, note_moyenne_du_jour) triée chronologiquement.
+    Utilisé pour le graphique de tendance des notes dans le temps.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT DATE(timestamp) as day, AVG(rating) as avg_r, COUNT(*) as cnt
+        FROM ratings
+        WHERE user_id = ? AND timestamp IS NOT NULL
+        GROUP BY DATE(timestamp)
+        ORDER BY day ASC;
+    """, (user_id,))
+    result = [{"day": row["day"], "avg_rating": round(row["avg_r"], 2), "count": row["cnt"]}
+              for row in cursor.fetchall()]
+    conn.close()
+    return result
+
+
+def get_pearson_matrix_for_user(user_id, max_neighbors=8) -> dict:
+    """
+    Calcule la corrélation de Pearson entre user_id et ses voisins de cluster.
+    Retourne :
+      {
+        "user_name": str,
+        "cluster_id": int,
+        "scores": [ {"user_id", "name", "score", "common_movies"}, ... ],
+        "user_vector": {film: note},
+      }
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Cluster de l'utilisateur
+    cursor.execute("SELECT cluster_id FROM user_clusters WHERE user_id = ?;", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {}
+    cluster_id = row["cluster_id"]
+
+    # Nom de l'utilisateur
+    cursor.execute("SELECT name FROM users WHERE user_id = ?;", (user_id,))
+    name_row = cursor.fetchone()
+    user_name = name_row["name"] if name_row else user_id
+
+    # Voisins du même cluster
+    cursor.execute("""
+        SELECT uc.user_id, u.name
+        FROM user_clusters uc
+        JOIN users u ON uc.user_id = u.user_id
+        WHERE uc.cluster_id = ? AND uc.user_id != ?
+        LIMIT ?;
+    """, (cluster_id, user_id, max_neighbors))
+    neighbors = [(r["user_id"], r["name"]) for r in cursor.fetchall()]
+
+    user_vec = _get_rating_vector(user_id, conn)
+    scores = []
+    for nb_id, nb_name in neighbors:
+        nb_vec = _get_rating_vector(nb_id, conn)
+        common = set(user_vec.keys()) & set(nb_vec.keys())
+        score  = _pearson(user_vec, nb_vec)
+        scores.append({
+            "user_id":       nb_id,
+            "name":          nb_name,
+            "score":         round(score, 3),
+            "common_movies": len(common),
+        })
+
+    scores.sort(key=lambda x: x["score"], reverse=True)
+    conn.close()
+    return {
+        "user_name":   user_name,
+        "cluster_id":  cluster_id,
+        "scores":      scores,
+        "user_vector": user_vec,
+    }
+
+
+def get_pearson_top_pairs_global(limit=12) -> list:
+    """
+    Calcule les paires d'utilisateurs les plus similaires sur TOUTE la base.
+    Retourne une liste triée de {"user_a", "user_b", "score", "common_movies"}.
+    Limité aux utilisateurs ayant au moins 3 films notés pour éviter les corrélations vides.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Utilisateurs avec au moins 3 films notés
+    cursor.execute("""
+        SELECT user_id FROM ratings
+        GROUP BY user_id HAVING COUNT(DISTINCT movie) >= 3
+        LIMIT 60;
+    """)
+    eligible = [r["user_id"] for r in cursor.fetchall()]
+
+    # Noms
+    placeholders = ",".join("?" * len(eligible)) if eligible else "'__'"
+    cursor.execute(f"SELECT user_id, name FROM users WHERE user_id IN ({placeholders});", eligible)
+    names = {r["user_id"]: r["name"] for r in cursor.fetchall()}
+
+    # Vecteurs
+    vectors = {uid: _get_rating_vector(uid, conn) for uid in eligible}
+
+    pairs = []
+    for i in range(len(eligible)):
+        for j in range(i + 1, len(eligible)):
+            uid_a, uid_b = eligible[i], eligible[j]
+            common = set(vectors[uid_a].keys()) & set(vectors[uid_b].keys())
+            if len(common) < 2:
+                continue
+            score = _pearson(vectors[uid_a], vectors[uid_b])
+            pairs.append({
+                "user_a":        names.get(uid_a, uid_a),
+                "user_b":        names.get(uid_b, uid_b),
+                "score":         round(score, 3),
+                "common_movies": len(common),
+            })
+
+    conn.close()
+    pairs.sort(key=lambda x: x["score"], reverse=True)
+    return pairs[:limit]
+
+
+def get_kmeans_viz_data(user_id) -> dict:
+    """
+    Données pour la visualisation K-Means de l'utilisateur :
+      - cluster_id de l'utilisateur
+      - genre dominant de son cluster
+      - liste des voisins avec leur genre dominant
+      - taille de chaque cluster
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT cluster_id FROM user_clusters WHERE user_id = ?;", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {}
+    user_cluster = row["cluster_id"]
+
+    # Taille de chaque cluster
+    cursor.execute("""
+        SELECT cluster_id, COUNT(*) as cnt
+        FROM user_clusters GROUP BY cluster_id;
+    """)
+    cluster_sizes = {r["cluster_id"]: r["cnt"] for r in cursor.fetchall()}
+
+    # Genre dominant par cluster (genre le plus noté en moyenne)
+    cursor.execute("""
+        SELECT uc.cluster_id, m.genre, COUNT(*) as cnt
+        FROM user_clusters uc
+        JOIN ratings r ON uc.user_id = r.user_id
+        JOIN movies  m ON r.movie    = m.title
+        GROUP BY uc.cluster_id, m.genre;
+    """)
+    cluster_genres = defaultdict(lambda: defaultdict(int))
+    for r in cursor.fetchall():
+        cluster_genres[r["cluster_id"]][r["genre"]] += r["cnt"]
+
+    dominant_genres = {}
+    for cid, genres in cluster_genres.items():
+        dominant_genres[cid] = max(genres, key=genres.get) if genres else "?"
+
+    # Voisins du même cluster (max 10)
+    cursor.execute("""
+        SELECT uc.user_id, u.name, u.profile_type
+        FROM user_clusters uc JOIN users u ON uc.user_id = u.user_id
+        WHERE uc.cluster_id = ? AND uc.user_id != ?
+        LIMIT 10;
+    """, (user_cluster, user_id))
+    neighbors = [{"user_id": r["user_id"], "name": r["name"], "genre": r["profile_type"]}
+                 for r in cursor.fetchall()]
+
+    cursor.execute("SELECT name FROM users WHERE user_id = ?;", (user_id,))
+    nm = cursor.fetchone()
+    conn.close()
+
+    return {
+        "user_name":      nm["name"] if nm else user_id,
+        "user_cluster":   user_cluster,
+        "cluster_sizes":  cluster_sizes,
+        "dominant_genres": dominant_genres,
+        "neighbors":      neighbors,
+        "total_clusters": len(cluster_sizes),
+    }
+
+
+def get_kmeans_global_viz() -> dict:
+    """
+    Vue globale K-Means sur toute la base :
+      - répartition des utilisateurs par cluster
+      - genre dominant et note moyenne par cluster
+      - nombre total d'utilisateurs clusterisés
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT cluster_id, COUNT(*) as cnt
+        FROM user_clusters GROUP BY cluster_id ORDER BY cluster_id;
+    """)
+    cluster_sizes = {r["cluster_id"]: r["cnt"] for r in cursor.fetchall()}
+
+    # Note moyenne par cluster
+    cursor.execute("""
+        SELECT uc.cluster_id, AVG(r.rating) as avg_r
+        FROM user_clusters uc JOIN ratings r ON uc.user_id = r.user_id
+        GROUP BY uc.cluster_id;
+    """)
+    cluster_avg_rating = {r["cluster_id"]: round(r["avg_r"], 2) for r in cursor.fetchall()}
+
+    # Genre dominant par cluster
+    cursor.execute("""
+        SELECT uc.cluster_id, m.genre, COUNT(*) as cnt
+        FROM user_clusters uc
+        JOIN ratings r ON uc.user_id = r.user_id
+        JOIN movies  m ON r.movie    = m.title
+        GROUP BY uc.cluster_id, m.genre;
+    """)
+    cluster_genres = defaultdict(lambda: defaultdict(int))
+    for r in cursor.fetchall():
+        cluster_genres[r["cluster_id"]][r["genre"]] += r["cnt"]
+
+    dominant_genres = {}
+    genre_breakdown = {}
+    for cid, genres in cluster_genres.items():
+        dominant_genres[cid] = max(genres, key=genres.get) if genres else "?"
+        total = sum(genres.values())
+        genre_breakdown[cid] = {g: round(c / total * 100, 1) for g, c in
+                                 sorted(genres.items(), key=lambda x: x[1], reverse=True)[:4]}
+
+    conn.close()
+    return {
+        "cluster_sizes":    cluster_sizes,
+        "dominant_genres":  dominant_genres,
+        "avg_ratings":      cluster_avg_rating,
+        "genre_breakdown":  genre_breakdown,
+        "total_users":      sum(cluster_sizes.values()),
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MOTEUR DE RECOMMANDATION — SÉLECTION AUTOMATIQUE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_recommendations(user_id, profile_type, age, limit=5) -> tuple:
-    """
-    Point d'entrée unique. Retourne (liste_films, mode_utilisé).
-    Délègue automatiquement selon la maturité.
-    """
     maturity = get_user_maturity(user_id)
     mode = maturity["mode"]
 
@@ -346,70 +587,67 @@ def get_recommendations(user_id, profile_type, age, limit=5) -> tuple:
 def _recommend_discovery(user_id, profile_type, limit=5) -> list:
     """
     Diversification forcée sur les premières recommandations.
-    On tire des films de PLUSIEURS genres pour ne pas enfermer l'utilisateur.
+    1 film par genre déclaré, puis complète avec d'autres genres si nécessaire.
+    Diversification par réalisateur : max 1 film par réalisateur.
     """
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Récupère les tags de l'utilisateur (s'ils existent), sinon profil par défaut
     tags = get_user_tags(user_id)
     if tags:
         genres = [t[0] for t in tags]
     else:
         genres = [profile_type]
-        # Ajouter 2 genres aléatoires pour la diversification
         all_genres = get_all_unique_genres()
         extras = [g for g in all_genres if g != profile_type]
         random.shuffle(extras)
         genres += extras[:2]
 
     already_seen = _get_excluded_movies(cursor, user_id)
-    placeholders_seen = ",".join("?" * len(already_seen)) if already_seen else "'__NONE__'"
-
     result = []
-    per_genre = max(1, limit // len(genres))
+    seen_directors = set()
 
     for genre in genres:
         if len(result) >= limit:
             break
-        needed = min(per_genre, limit - len(result))
-        # On prend un pool plus large pour varier (top 20) puis on mélange
-        query = f"""
-            SELECT title, avg_rating, director, year, duration_min, genre
-            FROM movies
-            WHERE genre = ?
-            AND title NOT IN ({placeholders_seen if already_seen else "'__NONE__'"})
-            AND avg_rating >= 3.5
-            ORDER BY avg_rating DESC
-            LIMIT 20;
-        """
-        params = [genre] + (already_seen if already_seen else [])
-        cursor.execute(query, params)
-        pool = [dict(r) for r in cursor.fetchall()]
-        random.shuffle(pool)
-        result += pool[:needed]
+        rows = _fetch_diverse_movies(cursor, genre, already_seen, seen_directors, needed=2)
+        result += rows
+        seen_directors.update(r["director"] for r in rows if r.get("director"))
+
+    # Complète si moins de `limit` films
+    if len(result) < limit:
+        all_genres = get_all_unique_genres()
+        for genre in all_genres:
+            if genre in genres or len(result) >= limit:
+                continue
+            rows = _fetch_diverse_movies(cursor, genre, already_seen, seen_directors, needed=1)
+            result += rows
+            seen_directors.update(r["director"] for r in rows if r.get("director"))
 
     conn.close()
-
-    # Marque dans exploration_log
-    _log_exploration(user_id, [m["title"] for m in result])
-    return result
+    _log_exploration(user_id, [m["title"] for m in result[:limit]])
+    return result[:limit]
 
 
 # ── Phase 1b : Système Expert ─────────────────────────────────────────────────
 
 def _recommend_expert(user_id, profile_type, age, limit=5) -> list:
     """
-    Filtrage par contenu : genre (via tags pondérés) + règles métier âge.
-    Ajout d'un biais sur le réalisateur si l'utilisateur a déjà noté ≥ 4/5 un film.
+    Filtrage par contenu avec diversification obligatoire :
+    - Pioche dans chaque tag (genre primaire en priorité, secondaires en appoint)
+    - Max 2 films par réalisateur pour éviter la monotonie
+    - Biais réalisateur : le réalisateur favori est proposé en premier, mais limité à 2 films
     """
     conn = get_connection()
     cursor = conn.cursor()
 
     tags = get_user_tags(user_id)
-    primary_genre = tags[0][0] if tags else profile_type.lower()
+    if tags:
+        genres = [t[0] for t in tags]
+    else:
+        genres = [profile_type.lower()]
 
-    # Réalisateur favori : si l'utilisateur a mis ≥ 4.0 à un film, on booste ce réalisateur
+    # Réalisateur favori
     cursor.execute("""
         SELECT m.director, AVG(r.rating) as avg_r
         FROM ratings r JOIN movies m ON r.movie = m.title
@@ -420,50 +658,66 @@ def _recommend_expert(user_id, profile_type, age, limit=5) -> list:
     fav_director = fav_row["director"] if fav_row else None
 
     already_seen = _get_excluded_movies(cursor, user_id)
-    placeholders = ",".join("?" * len(already_seen)) if already_seen else "'__NONE__'"
+    result = []
+    director_count = defaultdict(int)
+    MAX_PER_DIRECTOR = 2
 
-    # Films du genre primaire — on tire un pool large pour varier les résultats
-    query = f"""
-        SELECT title, avg_rating, director, year, duration_min, genre,
-               CASE WHEN director = ? THEN 1 ELSE 0 END as director_boost
-        FROM movies
-        WHERE genre = ?
-        AND title NOT IN ({placeholders if already_seen else "'__NONE__'"})
-        AND avg_rating >= 3.5
-        ORDER BY director_boost DESC, avg_rating DESC
-        LIMIT 30;
-    """
-    params = [fav_director or "", primary_genre] + (already_seen if already_seen else [])
-    cursor.execute(query, params)
-    pool = [dict(r) for r in cursor.fetchall()]
+    # Genre primaire en priorité
+    primary = genres[0]
+    primary_rows = _fetch_diverse_movies(
+        cursor, primary, already_seen, set(),
+        needed=min(3, limit),
+        preferred_director=fav_director,
+        max_per_director=MAX_PER_DIRECTOR
+    )
+    for r in primary_rows:
+        director_count[r.get("director", "")] += 1
+        result.append(r)
+
+    # Genres secondaires en appoint
+    for genre in genres[1:]:
+        if len(result) >= limit:
+            break
+        rows = _fetch_diverse_movies(
+            cursor, genre, already_seen,
+            {d for d, c in director_count.items() if c >= MAX_PER_DIRECTOR},
+            needed=limit - len(result),
+            max_per_director=MAX_PER_DIRECTOR
+        )
+        for r in rows:
+            director_count[r.get("director", "")] += 1
+            result.append(r)
+            if len(result) >= limit:
+                break
+
+    # Fallback : autres genres si encore insuffisant
+    if len(result) < limit:
+        all_genres = get_all_unique_genres()
+        for genre in all_genres:
+            if genre in genres or len(result) >= limit:
+                continue
+            rows = _fetch_diverse_movies(cursor, genre, already_seen, set(), needed=1)
+            result += rows
+
     conn.close()
-
-    # Les films du réalisateur favori restent en tête, les autres sont mélangés
-    fav_dir_movies = [m for m in pool if m.get("director_boost") == 1]
-    other_movies   = [m for m in pool if m.get("director_boost") == 0]
-    random.shuffle(other_movies)
-    movies = (fav_dir_movies + other_movies)[:limit]
-    return movies
+    return result[:limit]
 
 
 # ── Phase 2 : Moteur IA (Pearson + K-Means) ──────────────────────────────────
 
 def _recommend_ia(user_id, profile_type, age, limit=5) -> list:
     """
-    Filtrage hybride :
-      1. Réexécute K-Means pour mettre à jour les clusters
-      2. Trouve les voisins du même cluster
-      3. Calcule la corrélation de Pearson avec chaque voisin
-      4. Agrège les films bien notés par les voisins les plus similaires
-      5. Fallback sur le mode Expert si pas assez de résultats
+    Filtrage collaboratif :
+      1. K-Means pour trouver les voisins du même cluster
+      2. Pearson pour sélectionner les 5 voisins les plus similaires
+      3. Films bien notés par ces voisins, diversifiés par genre ET réalisateur
+      4. Fallback Expert si résultats insuffisants
     """
-    # Mise à jour du clustering
     run_kmeans_clustering()
 
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Cluster de l'utilisateur courant
     cursor.execute("SELECT cluster_id FROM user_clusters WHERE user_id = ?;", (user_id,))
     row = cursor.fetchone()
     if not row:
@@ -472,7 +726,6 @@ def _recommend_ia(user_id, profile_type, age, limit=5) -> list:
 
     cluster_id = row["cluster_id"]
 
-    # Voisins du même cluster (max 20)
     cursor.execute("""
         SELECT user_id FROM user_clusters
         WHERE cluster_id = ? AND user_id != ?
@@ -484,7 +737,6 @@ def _recommend_ia(user_id, profile_type, age, limit=5) -> list:
         conn.close()
         return _recommend_expert(user_id, profile_type, age, limit)
 
-    # Corrélation de Pearson avec chaque voisin
     user_ratings = _get_rating_vector(user_id, conn)
     pearson_scores = []
     for nb_id in neighbors:
@@ -500,13 +752,15 @@ def _recommend_ia(user_id, profile_type, age, limit=5) -> list:
         conn.close()
         return _recommend_expert(user_id, profile_type, age, limit)
 
-    # Films bien notés par les meilleurs voisins (≥ 4.0)
     already_seen = _get_excluded_movies(cursor, user_id)
     placeholders_nb = ",".join("?" * len(top_neighbors))
     placeholders_ex = ",".join("?" * len(already_seen)) if already_seen else "'__NONE__'"
 
+    # Films bien notés par les voisins, diversifiés : on prend jusqu'à limit*3
+    # puis on filtre pour max 2 par réalisateur et max 2 par genre
     query = f"""
-        SELECT r.movie as title, AVG(r.rating) as avg_rating, m.director, m.year, m.duration_min, m.genre
+        SELECT r.movie as title, AVG(r.rating) as avg_rating, m.director, m.year,
+               m.duration_min, m.genre
         FROM ratings r JOIN movies m ON r.movie = m.title
         WHERE r.user_id IN ({placeholders_nb})
         AND r.rating >= 4.0
@@ -515,10 +769,13 @@ def _recommend_ia(user_id, profile_type, age, limit=5) -> list:
         ORDER BY avg_rating DESC
         LIMIT ?;
     """
-    params = top_neighbors + (already_seen if already_seen else []) + [limit]
+    params = top_neighbors + (already_seen if already_seen else []) + [limit * 3]
     cursor.execute(query, params)
-    movies = [dict(r) for r in cursor.fetchall()]
+    candidates = [dict(r) for r in cursor.fetchall()]
     conn.close()
+
+    # Diversification : max 2 par réalisateur, max 2 par genre
+    movies = _diversify(candidates, max_per_director=2, max_per_genre=2, limit=limit)
 
     # Fallback si pas assez
     if len(movies) < limit:
@@ -532,19 +789,13 @@ def _recommend_ia(user_id, profile_type, age, limit=5) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ALGORITHME K-MEANS (simplifié, basé sur les vecteurs de notes)
+# ALGORITHME K-MEANS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_kmeans_clustering():
-    """
-    Regroupe tous les utilisateurs ayant des notes en K clusters.
-    Chaque utilisateur est représenté par son vecteur de notes moyen par genre.
-    Résultats persistés dans user_clusters.
-    """
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Vecteur de chaque utilisateur : moyenne par genre
     cursor.execute("""
         SELECT r.user_id, m.genre, AVG(r.rating) as avg_r
         FROM ratings r JOIN movies m ON r.movie = m.title
@@ -556,7 +807,6 @@ def run_kmeans_clustering():
         conn.close()
         return
 
-    # Collecte tous les genres présents
     all_genres = sorted(set(r["genre"] for r in rows))
     user_vectors = defaultdict(lambda: [0.0] * len(all_genres))
     genre_idx = {g: i for i, g in enumerate(all_genres)}
@@ -571,7 +821,7 @@ def run_kmeans_clustering():
         conn.close()
         return
 
-    # Initialisation des centroïdes (K-Means++)
+    # K-Means++
     centroids = [vectors[random.randint(0, len(vectors) - 1)]]
     while len(centroids) < CLUSTER_COUNT:
         dists = [min(_euclidean(v, c) for c in centroids) for v in vectors]
@@ -587,7 +837,6 @@ def run_kmeans_clustering():
                 centroids.append(vectors[i])
                 break
 
-    # Itérations K-Means (max 20)
     assignments = [0] * len(users)
     for _ in range(20):
         new_assignments = [
@@ -597,13 +846,11 @@ def run_kmeans_clustering():
         if new_assignments == assignments:
             break
         assignments = new_assignments
-        # Recalcul des centroïdes
         for c in range(len(centroids)):
             members = [vectors[i] for i, a in enumerate(assignments) if a == c]
             if members:
                 centroids[c] = [sum(x) / len(members) for x in zip(*members)]
 
-    # Persistance
     cursor.execute("DELETE FROM user_clusters;")
     import datetime
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -621,14 +868,12 @@ def run_kmeans_clustering():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_rating_vector(user_id, conn) -> dict:
-    """Retourne {film: note} pour un utilisateur."""
     cursor = conn.cursor()
     cursor.execute("SELECT movie, rating FROM ratings WHERE user_id = ?;", (user_id,))
     return {r["movie"]: r["rating"] for r in cursor.fetchall()}
 
 
 def _pearson(v1: dict, v2: dict) -> float:
-    """Corrélation de Pearson entre deux vecteurs de notes (dict film→note)."""
     common = set(v1.keys()) & set(v2.keys())
     n = len(common)
     if n < 2:
@@ -649,7 +894,6 @@ def _pearson(v1: dict, v2: dict) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_excluded_movies(cursor, user_id) -> list:
-    """Retourne la liste des films déjà vus ou recommandés."""
     cursor.execute(
         "SELECT movie FROM ratings WHERE user_id = ? "
         "UNION SELECT movie FROM recommendations WHERE user_id = ? "
@@ -657,6 +901,83 @@ def _get_excluded_movies(cursor, user_id) -> list:
         (user_id, user_id, user_id)
     )
     return [r[0] for r in cursor.fetchall()]
+
+
+def _fetch_diverse_movies(cursor, genre, already_seen, blocked_directors,
+                          needed=1, preferred_director=None, max_per_director=2) -> list:
+    """
+    Récupère jusqu'à `needed` films d'un genre donné en respectant :
+    - exclusion des films déjà vus
+    - exclusion des réalisateurs bloqués (quota atteint)
+    - préférence pour preferred_director (en tête de liste)
+    """
+    placeholders_ex = ",".join("?" * len(already_seen)) if already_seen else "'__NONE__'"
+    placeholders_bd = ",".join("?" * len(blocked_directors)) if blocked_directors else "'__NONE__'"
+
+    preferred_director_val = preferred_director or ""
+
+    query = f"""
+        SELECT title, avg_rating, director, year, duration_min, genre,
+               CASE WHEN director = ? THEN 1 ELSE 0 END as pref_boost
+        FROM movies
+        WHERE genre = ?
+        AND title NOT IN ({placeholders_ex if already_seen else "'__NONE__'"})
+        AND (director NOT IN ({placeholders_bd if blocked_directors else "'__NONE__'"}))
+        ORDER BY pref_boost DESC, avg_rating DESC
+        LIMIT ?;
+    """
+    params = (
+        [preferred_director_val, genre]
+        + (already_seen if already_seen else [])
+        + (list(blocked_directors) if blocked_directors else [])
+        + [needed * max_per_director]   # On récupère plus pour filtrer ensuite
+    )
+    cursor.execute(query, params)
+    rows = [dict(r) for r in cursor.fetchall()]
+
+    # Diversification : max `max_per_director` par réalisateur dans ce lot
+    result = []
+    local_director_count = defaultdict(int)
+    for row in rows:
+        d = row.get("director", "")
+        if local_director_count[d] < max_per_director:
+            result.append(row)
+            local_director_count[d] += 1
+        if len(result) >= needed:
+            break
+    return result
+
+
+def _diversify(candidates: list, max_per_director=2, max_per_genre=2, limit=5) -> list:
+    """Filtre une liste de candidats pour garantir la diversité réalisateur + genre."""
+    result = []
+    director_count = defaultdict(int)
+    genre_count = defaultdict(int)
+
+    for m in candidates:
+        d = m.get("director", "")
+        g = m.get("genre", "")
+        if director_count[d] < max_per_director and genre_count[g] < max_per_genre:
+            result.append(m)
+            director_count[d] += 1
+            genre_count[g] += 1
+        if len(result) >= limit:
+            break
+
+    # Deuxième passe sans contrainte genre si pas assez
+    if len(result) < limit:
+        existing = {m["title"] for m in result}
+        for m in candidates:
+            if m["title"] in existing:
+                continue
+            d = m.get("director", "")
+            if director_count[d] < max_per_director:
+                result.append(m)
+                director_count[d] += 1
+            if len(result) >= limit:
+                break
+
+    return result[:limit]
 
 
 def _log_exploration(user_id, titles: list):
@@ -677,9 +998,8 @@ def _euclidean(v1: list, v2: list) -> float:
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(v1, v2)))
 
 
-# ── Conservé pour compatibilité avec clean_data.py ────────────────────────────
+# ── Rétro-compatibilité clean_data.py ─────────────────────────────────────────
 def get_movies_by_genre(user_id, genre, limit=5):
-    """Alias vers le moteur expert, pour rétro-compatibilité."""
     conn = get_connection()
     cursor = conn.cursor()
     query = """

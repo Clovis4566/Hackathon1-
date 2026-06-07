@@ -2,101 +2,17 @@
 main.py
 ───────
 Interface utilisateur principale (IHM Console).
-Focus exclusif sur le processus d'échange, la persistance des menus
-et la sécurité de la connexion. Sans effacement de terminal.
 
-Évolutions vs version initiale :
-  • Affichage du mode actif (Découverte / Système Expert / IA) dans l'espace membre
-  • Barre de progression vers la phase IA
-  • Appel à database.get_recommendations() à la place de get_movies_by_genre()
-  • Indicateur visuel du moteur utilisé sur chaque résultat
+Évolutions v3 :
+  • Option [3] Modifier mon profil (pseudo, âge, tags, question secrète)
+  • Option [4] Visualiser mes statistiques (appel viz.py)
+  • Option [5] Déconnexion (anciennement [3])
+  • save_user_feedback : gère le retour "updated" vs "inserted"
 """
 import sys
 import database
 import onboarding
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# VISUALISATIONS (ASCII — sans dépendance externe)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _display_genre_distribution(user_id):
-    """Diagramme en barres ASCII : répartition des genres dans l'historique."""
-    conn = database.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT m.genre, COUNT(*) as cnt
-        FROM ratings r
-        JOIN movies m ON r.movie = m.title
-        WHERE r.user_id = ?
-        GROUP BY m.genre
-        ORDER BY cnt DESC;
-    """, (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-
-    print("\n" + "═"*60)
-    print(" 📊 DISTRIBUTION DE VOS GENRES REGARDÉS")
-    print("═"*60)
-
-    if not rows:
-        print("   ℹ️  Aucune évaluation enregistrée pour le moment.")
-        input("\nAppuyez sur ENTRÉE pour continuer...")
-        return
-
-    total = sum(r["cnt"] for r in rows)
-    bar_width = 30
-    for r in rows:
-        pct = r["cnt"] / total * 100
-        filled = int(pct / 100 * bar_width)
-        bar = "█" * filled + "░" * (bar_width - filled)
-        print(f"  {r['genre'].upper():<12} [{bar}] {r['cnt']:>3} film(s)  ({pct:.0f}%)")
-
-    print("═"*60)
-    input("\nAppuyez sur ENTRÉE pour continuer...")
-
-
-def _display_rating_trend(user_id):
-    """Graphique ASCII : évolution des notes au fil du temps."""
-    conn = database.get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT movie, rating, timestamp
-        FROM ratings
-        WHERE user_id = ? AND source = 'system_expert_feedback'
-        ORDER BY timestamp ASC;
-    """, (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-
-    print("\n" + "═"*65)
-    print(" 📈 ÉVOLUTION DE VOS NOTES AU FIL DU TEMPS")
-    print("═"*65)
-
-    if not rows:
-        print("   ℹ️  Aucune note enregistrée pour le moment.")
-        input("\nAppuyez sur ENTRÉE pour continuer...")
-        return
-
-    chart_height = 5   # Lignes de 1 à 5
-    print(f"\n   Note")
-    for y in range(5, 0, -1):
-        line = f"  {y} │"
-        for r in rows:
-            rating = int(round(r["rating"]))
-            line += " ●" if rating == y else "  "
-        print(line)
-    print("    └" + "──" * len(rows))
-    print("      " + "".join(f"{i+1:<2}" for i in range(len(rows))))
-    print("      (ordre chronologique des évaluations)")
-
-    # Résumé statistique
-    ratings = [r["rating"] for r in rows]
-    avg = sum(ratings) / len(ratings)
-    trend = "📈 En hausse" if ratings[-1] > ratings[0] else ("📉 En baisse" if ratings[-1] < ratings[0] else "➡️  Stable")
-    print(f"\n  Moyenne : {avg:.2f}/5  |  Tendance : {trend}  |  Films notés : {len(rows)}")
-    print("═"*65)
-    input("\nAppuyez sur ENTRÉE pour continuer...")
+import viz
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -115,7 +31,6 @@ def show_welcome_screen():
 
 
 def _mode_label(mode: str) -> str:
-    """Retourne un label coloré/emoji selon le mode actif."""
     return {
         "discovery": "🔭 DÉCOUVERTE (Cold Start)",
         "expert":    "⚙️  SYSTÈME EXPERT",
@@ -200,16 +115,118 @@ def handle_account_recovery():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MODIFICATION DU PROFIL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def handle_edit_profile(user) -> dict:
+    """
+    Permet à l'utilisateur de modifier :
+      - Son prénom / pseudo
+      - Son âge
+      - Ses tags de genres (relance le questionnaire onboarding)
+      - Sa question / réponse secrète
+    Retourne le dict user mis à jour (rechargé depuis la base).
+    """
+    while True:
+        print("\n" + "✏️ "*15)
+        print(" MODIFICATION DE VOTRE PROFIL")
+        print("✏️ "*15)
+        print(f"  Profil actuel — {user['name']} | {user['age']} ans | {user['profile_type'].upper()}")
+
+        tags = database.get_user_tags(user['user_id'])
+        if tags:
+            print(f"  Tags           — {' | '.join(t[0].upper() for t in tags)}")
+
+        print()
+        print(" [1] Modifier mon prénom / pseudo")
+        print(" [2] Modifier mon âge")
+        print(" [3] Modifier mes genres préférés (tags)")
+        print(" [4] Modifier ma question de sécurité")
+        print(" [Q] Retour sans modifier")
+        print("─"*50)
+
+        choice = input("Votre choix : ").strip().upper()
+
+        if choice == "Q":
+            break
+
+        elif choice == "1":
+            new_name = input("Nouveau prénom / pseudo : ").strip()
+            if not new_name:
+                print("❌ Le prénom ne peut pas être vide.")
+                continue
+            conn = database.get_connection()
+            conn.execute(
+                "UPDATE users SET name = ? WHERE user_id = ?;",
+                (new_name, user['user_id'])
+            )
+            conn.commit()
+            conn.close()
+            print(f"✅ Prénom mis à jour : {new_name}")
+
+        elif choice == "2":
+            age_input = input("Nouvel âge : ").strip()
+            if not age_input.isdigit() or not (15 <= int(age_input) <= 99):
+                print("❌ Âge invalide (doit être entre 15 et 99).")
+                continue
+            conn = database.get_connection()
+            conn.execute(
+                "UPDATE users SET age = ? WHERE user_id = ?;",
+                (int(age_input), user['user_id'])
+            )
+            conn.commit()
+            conn.close()
+            print(f"✅ Âge mis à jour : {age_input} ans")
+
+        elif choice == "3":
+            print("\n Relancement du questionnaire de genres...")
+            all_tags, primary = onboarding.collect_user_preferences()
+            database.save_user_tags(user['user_id'], all_tags)
+            conn = database.get_connection()
+            conn.execute(
+                "UPDATE users SET profile_type = ? WHERE user_id = ?;",
+                (primary, user['user_id'])
+            )
+            conn.commit()
+            conn.close()
+            print(f"✅ Tags mis à jour : {' | '.join(t.upper() for t in all_tags)}")
+
+        elif choice == "4":
+            new_q = onboarding.show_numbered_menu(
+                database.SECRET_QUESTIONS,
+                "Choisissez votre nouvelle question de sécurité :"
+            )
+            new_a = input("Votre nouvelle réponse secrète : ").strip().lower()
+            if not new_a:
+                print("❌ La réponse ne peut pas être vide.")
+                continue
+            conn = database.get_connection()
+            conn.execute(
+                "UPDATE users SET secret_question = ?, secret_answer = ? WHERE user_id = ?;",
+                (new_q, new_a, user['user_id'])
+            )
+            conn.commit()
+            conn.close()
+            print("✅ Question de sécurité mise à jour.")
+
+        else:
+            print("❌ Option invalide.")
+
+    # Recharge le user depuis la base pour avoir les données fraîches
+    updated_user = database.find_user_by_code(user['session_code'])
+    return updated_user if updated_user else user
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ESPACE MEMBRE — BOUCLE PRINCIPALE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_main_application_loop(user):
-    """Boucle interne de l'espace membre. Aucun terminal ne s'efface ici."""
+    """Boucle interne de l'espace membre."""
     while True:
-        # Récupération de la maturité en temps réel
-        maturity  = database.get_user_maturity(user['user_id'])
-        mode_lbl  = _mode_label(maturity["mode"])
-        progress  = _render_progress_bar(maturity["progress_pct"])
+        maturity = database.get_user_maturity(user['user_id'])
+        mode_lbl = _mode_label(maturity["mode"])
+        progress = _render_progress_bar(maturity["progress_pct"])
 
         print("\n" + "═"*70)
         print(f" 👤 ESPACE MEMBRE — {user['name'].upper()} | Genre : {user['profile_type'].upper()}")
@@ -221,32 +238,31 @@ def run_main_application_loop(user):
         print("═"*70)
         print(" [1] Consulter ma fiche profil & mon historique de visionnage")
         print(" [2] Lancer une demande de Recommandation Flash (Top 5)")
-        print(" [3] 📊 Visualiser mes statistiques (genres & tendances)")
-        print(" [4] Me déconnecter de mon espace")
+        print(" [3] Modifier mon profil")
+        print(" [4] Visualiser mes statistiques de visionnage")
+        print(" [5] Me déconnecter de mon espace")
         print("═"*70)
 
-        choice = input("Votre choix (1-4) : ").strip()
+        choice = input("Votre choix (1-5) : ").strip()
 
-        # ── Option 1 : Profil ────────────────────────────────────────────────
         if choice == "1":
             _display_profile(user)
 
-        # ── Option 2 : Recommandations ───────────────────────────────────────
         elif choice == "2":
             _display_recommendations(user)
 
-        # ── Option 3 : Visualisations ────────────────────────────────────────
         elif choice == "3":
-            _display_genre_distribution(user['user_id'])
-            _display_rating_trend(user['user_id'])
+            user = handle_edit_profile(user)
 
-        # ── Option 4 : Déconnexion ───────────────────────────────────────────
         elif choice == "4":
+            viz.show_viz_menu(user['user_id'])
+
+        elif choice == "5":
             print(f"\n👋 Déconnexion réussie. À bientôt {user['name']} !")
             break
 
         else:
-            print("❌ Option invalide. Entrez 1, 2, 3 ou 4.")
+            print("❌ Option invalide. Entrez un chiffre de 1 à 5.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -262,13 +278,11 @@ def _display_profile(user):
     print(f"  • Âge renseigné     : {user['age']} ans")
     print(f"  • Genre primaire    : {user['profile_type'].upper()}")
 
-    # Tags multi-genres
     tags = database.get_user_tags(user['user_id'])
     if tags:
         tags_str = " | ".join(f"{t[0].upper()} (×{t[1]:.0f})" for t in tags)
         print(f"  • Tags déclarés     : {tags_str}")
 
-    # Maturité
     maturity = database.get_user_maturity(user['user_id'])
     print(f"\n  🧠 Phase moteur    : {_mode_label(maturity['mode'])}")
     print(f"  📊 Films évalués   : {maturity['rating_count']} / {maturity['threshold']} (seuil IA)")
@@ -277,8 +291,7 @@ def _display_profile(user):
     history = database.get_user_viewing_history(user['user_id'])
     if history:
         for idx, row in enumerate(history, 1):
-            source_label = "🎬 Quiz" if row['source'] == 'discovery_quiz' else "⭐ Reco"
-            print(f"   [{idx}] {row['movie']} | Note : {row['rating']}/5  {source_label}  (Le {row['timestamp']})")
+            print(f"   [{idx}] {row['movie']} | Note : {row['rating']}/5 (Le {row['timestamp']})")
     else:
         print("   ℹ️  Votre historique est vide. Vous n'avez pas encore noté de films.")
 
@@ -287,9 +300,6 @@ def _display_profile(user):
 
 
 def _display_recommendations(user):
-    """Affiche le Top 5 et lance la boucle de notation en série."""
-
-    # ── Appel au moteur hybride ───────────────────────────────────────────────
     recs, mode_used, maturity = database.get_recommendations(
         user_id      = user['user_id'],
         profile_type = user['profile_type'],
@@ -302,7 +312,6 @@ def _display_recommendations(user):
         input("\nAppuyez sur ENTRÉE pour revenir...")
         return
 
-    # ── Affichage du moteur utilisé ──────────────────────────────────────────
     print(f"\n🔮 MOTEUR : {_mode_label(mode_used)}")
     print(f"   TOP 5 SUGGESTIONS — Fraîches & Personnalisées")
     print(f"{'Rang':<5} | {'Titre du Film':<28} | {'Note':<6} | {'Réalisateur'}")
@@ -315,7 +324,6 @@ def _display_recommendations(user):
         displayed_movies.append(movie['title'])
         database.save_recommendation(user['user_id'], movie['title'])
 
-    # ── Boucle de notation (inchangée dans sa logique) ───────────────────────
     while True:
         print("\n" + "⚙️ " + "─"*52 + " ⚙️")
         print(" 🤖 ENQUÊTE DE SATISFACTION (En continu)")
@@ -338,19 +346,17 @@ def _display_recommendations(user):
 
                 satisfaction_score = input(" Votre note (1-5) : ").strip()
                 if satisfaction_score.isdigit() and 1 <= int(satisfaction_score) <= 5:
-                    success = database.save_user_feedback(user['user_id'], chosen_title, satisfaction_score)
-                    if success == "already_rated":
-                        print(f" ⚠️  Vous avez déjà noté '{chosen_title}'. Chaque film ne peut être évalué qu'une seule fois.")
-                    elif success:
-                        print(f" 🎉 Enregistré ! Note de {satisfaction_score}/5 ajoutée pour '{chosen_title}'.")
-                        # Affiche la progression vers la phase IA après chaque note
+                    result = database.save_user_feedback(user['user_id'], chosen_title, satisfaction_score)
+                    if result == "inserted":
                         new_maturity = database.get_user_maturity(user['user_id'])
+                        print(f" 🎉 Enregistré ! Note de {satisfaction_score}/5 pour '{chosen_title}'.")
                         if not new_maturity["is_ai_ready"]:
                             bar = _render_progress_bar(new_maturity["progress_pct"], width=20)
                             print(f" 📈 Progression IA : {bar} ({new_maturity['rating_count']}/{new_maturity['threshold']})")
-                        else:
-                            if new_maturity["rating_count"] == new_maturity["threshold"]:
-                                print(" 🚀 SEUIL ATTEINT ! Le moteur IA est maintenant actif pour vous !")
+                        elif new_maturity["rating_count"] == new_maturity["threshold"]:
+                            print(" 🚀 SEUIL ATTEINT ! Le moteur IA est maintenant actif pour vous !")
+                    elif result == "updated":
+                        print(f" 🔄 Note mise à jour : {satisfaction_score}/5 pour '{chosen_title}' (pas de doublon comptabilisé).")
                     else:
                         print(" ❌ Erreur technique lors de l'enregistrement.")
                 else:
