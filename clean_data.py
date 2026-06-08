@@ -205,7 +205,7 @@ def present_step(step_num, title, df_raw, df_clean, explanations):
     print("\n" + "═"*85)
     print(f" 🎬 ÉTAPE {step_num} : {title}")
     print("═"*85)
-    print("\n📊 EXTRAIT DES DONNÉES BRUTES SÉLECTIONNÉES (AVANT) :")
+    print("\nEXTRAIT DES DONNÉES BRUTES SÉLECTIONNÉES (AVANT) :")
     print("-" * 85)
     print(df_raw.dropna().head(5).to_string(index=False))
     print(f"Nombre total de lignes au départ : {len(df_raw)}")
@@ -302,7 +302,7 @@ def run_full_etl_pipeline():
         profile = row["profile_type"] if isinstance(row["profile_type"], str) else "action"
         database.save_user_tags(row["user_id"], [profile])
     conn = database.get_connection()
-    print(f"   ✅ Tags enregistrés pour {len(df_u)} utilisateurs.")
+    print(f"    Tags enregistrés pour {len(df_u)} utilisateurs.")
 
     # ──────────────────────────────────────────────────────────────────────────
     # ÉTAPE 3 : RATINGS
@@ -362,7 +362,7 @@ def run_full_etl_pipeline():
     print("═"*85)
 
     print("\n🎉 [ETL SUCCESS] Démo terminée. Le catalogue est propre, réaliste et prêt !")
-    print("   ✅ Tables : movies, users, ratings, user_tags, user_clusters")
+    print("    Tables : movies, users, ratings, user_tags, user_clusters")
 
 
 if __name__ == "__main__":

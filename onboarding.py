@@ -58,7 +58,7 @@ def show_numbered_menu(options, prompt_text, multi=False) -> list | str:
                 if 0 <= idx_chosen < len(options):
                     return options[idx_chosen]
 
-        print("❌ Choix invalide. Veuillez sélectionner un ou plusieurs numéros valides.")
+        print(" Choix invalide. Veuillez sélectionner un ou plusieurs numéros valides.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -190,7 +190,7 @@ def run_discovery_quiz(user_id: str, all_tags: list) -> int:
 
     films = _pick_quiz_films(all_tags, n=10)
     if not films:
-        print("\n⚠️  Le catalogue est vide. Lancez d'abord clean_data.py.")
+        print("\n️  Le catalogue est vide. Lancez d'abord clean_data.py.")
         return 0
 
     CHOICES = [
@@ -221,11 +221,11 @@ def run_discovery_quiz(user_id: str, all_tags: list) -> int:
                 if note is not None:
                     database.save_discovery_rating(user_id, film['title'], note)
                     rated_count += 1
-                    print(f"  ✅ Note {note:.0f}/5 enregistrée pour « {film['title']} »")
+                    print(f"   Note {note:.0f}/5 enregistrée pour « {film['title']} »")
                 else:
                     print(f"  ⏭️  Film ignoré (jamais vu).")
                 break
-            print("  ❌ Répondez avec un chiffre entre 1 et 5.")
+            print("   Répondez avec un chiffre entre 1 et 5.")
 
     print(f"\n  🎯 Quiz terminé ! {rated_count} film(s) noté(s).")
     print("  Ces données alimentent déjà le moteur de recommandation.")
@@ -246,7 +246,7 @@ def trigger_user_registration() -> str | None:
     Retourne le session_code généré en cas de succès, None sinon.
     """
     print("\n" + "═"*60)
-    print(" 👤 CRÉATION DE VOTRE ESPACE PERSONNEL")
+    print("  CRÉATION DE VOTRE ESPACE PERSONNEL")
     print("═"*60)
 
     name = input("Comment souhaitez-vous qu'on vous appelle ? (Prénom/Pseudo) : ").strip()
@@ -275,7 +275,7 @@ def trigger_user_registration() -> str | None:
     )
 
     if not success:
-        print("\n❌ Erreur lors de la création du compte (ID ou session déjà utilisé). Réessayez.")
+        print("\n Erreur lors de la création du compte (ID ou session déjà utilisé). Réessayez.")
         return None
 
     # Persistance des tags multi-genres

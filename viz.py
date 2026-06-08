@@ -59,7 +59,7 @@ def show_genre_distribution(user_id: str):
     data = database.get_genre_distribution(user_id)
 
     print("\n" + "═"*65)
-    print(" 📊  DISTRIBUTION DE VOS GENRES REGARDÉS")
+    print("  DISTRIBUTION DE VOS GENRES REGARDÉS")
     print("═"*65)
 
     if not data:
@@ -367,7 +367,7 @@ def show_kmeans_global():
     sizes = list(cluster_sizes.values())
     ideal = total_users / len(sizes)
     imbalance = max(abs(s - ideal) / ideal * 100 for s in sizes)
-    balance_label = "✅ Bien équilibré" if imbalance < 25 else "⚠️  Déséquilibré"
+    balance_label = " Bien équilibré" if imbalance < 25 else "️  Déséquilibré"
     print(f"  Équilibre des clusters : {balance_label} (écart max : {imbalance:.0f}%)")
     print("═"*70)
 
@@ -380,7 +380,7 @@ def show_viz_menu(user_id: str):
     """Menu de sélection des visualisations, appelé depuis main.py."""
     while True:
         print("\n" + "═"*70)
-        print(" 📊  TABLEAU DE BORD — ANALYSE DE VOS DONNÉES")
+        print("  TABLEAU DE BORD — ANALYSE DE VOS DONNÉES")
         print("═"*70)
         print(" ── Vos statistiques personnelles ──────────────────────────────")
         print(" [1] Distribution de vos genres regardés")
@@ -419,7 +419,7 @@ def show_viz_menu(user_id: str):
         elif choice == "Q":
             break
         else:
-            print("❌ Option invalide.")
+            print(" Option invalide.")
 
         if choice in "1234567":
             input("\nAppuyez sur ENTRÉE pour continuer...")

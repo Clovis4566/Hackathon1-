@@ -124,7 +124,7 @@ def plot_user_genre_pie(user_id: str, user_name: str) -> str:
     """
     data = database.get_genre_distribution(user_id)
     if not data:
-        print(f"  ⚠  Pas de données pour {user_name}.")
+        print(f"    Pas de données pour {user_name}.")
         return ""
 
     counts = {g: c for g, c in data.items()}
@@ -170,7 +170,7 @@ def plot_user_ratings_timeline(user_id: str, user_name: str) -> str:
     conn.close()
 
     if len(detail_rows) < 2:
-        print(f"  ⚠  Pas assez de données timeline pour {user_name}.")
+        print(f"    Pas assez de données timeline pour {user_name}.")
         return ""
 
     ratings = [r["rating"] for r in detail_rows]
@@ -333,7 +333,7 @@ def plot_pearson_user_neighbors(user_id: str, user_name: str) -> str:
     """
     data = database.get_pearson_matrix_for_user(user_id, max_neighbors=12)
     if not data or not data.get("scores"):
-        print(f"  ⚠  Pas de données Pearson pour {user_name} (clustering absent ?).")
+        print(f"    Pas de données Pearson pour {user_name} (clustering absent ?).")
         return ""
 
     scores   = data["scores"]
@@ -388,7 +388,7 @@ def plot_kmeans_scatter(rows: list, highlight_user_id: str = None,
     """
     user_ids, matrix, ug = _build_user_genre_matrix(rows)
     if len(user_ids) < 4:
-        print("  ⚠  Pas assez d'utilisateurs pour le K-Means.")
+        print("    Pas assez d'utilisateurs pour le K-Means.")
         return ""
 
     # Lecture des clusters depuis la base (déjà calculés)
@@ -481,7 +481,7 @@ def plot_kmeans_global(rows: list) -> str:
     """
     data = database.get_kmeans_global_viz()
     if not data or not data.get("cluster_sizes"):
-        print("  ⚠  Pas de données K-Means globales.")
+        print("    Pas de données K-Means globales.")
         return ""
 
     cluster_sizes  = data["cluster_sizes"]
@@ -612,7 +612,7 @@ if __name__ == "__main__":
                 user_name = user["name"]
                 print(f"\n  Utilisateur détecté : {user_name} (ID {user_id})")
             else:
-                print(f"\n  ⚠  Clé de session inconnue : {session_code}")
+                print(f"\n    Clé de session inconnue : {session_code}")
 
     run_all_charts(user_id=user_id, user_name=user_name)
 
@@ -626,7 +626,7 @@ def show_charts_menu(user_id: str, user_name: str):
     while True:
 
         print("\n" + "═"*70)
-        print(" 📊 TABLEAU DE BORD — ANALYSE DE VOS DONNÉES")
+        print(" TABLEAU DE BORD — ANALYSE DE VOS DONNÉES")
         print("═"*70)
 
         print(" ── Vos statistiques personnelles ─────────────────────")
@@ -671,7 +671,7 @@ def show_charts_menu(user_id: str, user_name: str):
         elif choice == "7":
             generated = run_all_charts(user_id, user_name)
 
-            print("\n✅ Graphiques générés :")
+            print("\n Graphiques générés :")
             for p in generated:
                 print(f"   • {p}")
 
@@ -682,11 +682,11 @@ def show_charts_menu(user_id: str, user_name: str):
             break
 
         else:
-            print("❌ Option invalide.")
+            print(" Option invalide.")
             continue
 
         if path:
-            print("\n✅ Graphique généré :")
+            print("\n Graphique généré :")
             print(path)
 
         input("\nAppuyez sur ENTRÉE pour continuer...")
